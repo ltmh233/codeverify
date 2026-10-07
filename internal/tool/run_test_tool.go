@@ -4,25 +4,40 @@ import (
 	"codeverify/internal/core"
 	"context"
 	"os/exec"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
 )
 
-type RunTestTool struct {
-	RepoPath string
-}
+type RunTestTool struct{}
 
 func (t *RunTestTool) Name() core.ToolName {
 	return core.ToolRunTest
 }
 
-func (t *RunTestTool) Execute(ctx context.Context, args map[string]string) (core.Observation, error) {
+func (t *RunTestTool) Execute(ctx context.Context, runCtx core.RunContext, rawArgs string) (core.Observation, error) {
 
 	cmd := exec.CommandContext(ctx, "go", "test", "./...")
-	cmd.Dir = t.RepoPath
+	cmd.Dir = runCtx.RepoAbs
 
 	output, err := cmd.CombinedOutput()
 
 	return core.Observation{
 		Success: err == nil,
 		Output:  string(output),
-	}, err
+	}, nil
+}
+
+func (t *RunTestTool) Spec() *responses.ToolUnionParam {
+	return &responses.ToolUnionParam{
+		OfFunction: &responses.FunctionToolParam{
+			Parameters: map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{},
+				"additionalProperties": false,
+			},
+			Name:        "run_test",
+			Description: openai.String("Run all go test in current repository"),
+		},
+	}
 }

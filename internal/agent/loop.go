@@ -7,34 +7,67 @@ import (
 	"fmt"
 )
 
-func Run(ctx context.Context, a Agent, state *core.State, tools map[string]tool.Tool) error {
-	const maxSteps = 10
+func Run(ctx context.Context, a Agent, state *core.State, runCtx core.RunContext, tools map[string]tool.Tool) error {
+	const maxSteps = 100
 
-	for step := range maxSteps {
-		decision, err := a.Decide(ctx, state)
+	for s := range maxSteps {
+		turn, err := a.Decide(ctx, state)
 		if err != nil {
 			return err
 		}
+		step := core.Step{
+			Turn: core.Turn{
+				Reasonings: turn.Reasonings,
+				ToolCalls:  []*core.ToolCall{},
+			},
+			ToolResults: []core.ToolResult{},
+		}
+		for _, toolCall := range turn.ToolCalls {
+			fmt.Printf("[step %d]toolCall: %+v\n", s+1, toolCall.Name)
+			step.Turn.ToolCalls = append(step.Turn.ToolCalls, toolCall)
 
-		fmt.Printf("[step %d]decision: %+v\n", step+1, decision)
+			t, ok := tools[string(toolCall.Name)]
+			if !ok {
+				observation := core.Observation{
+					Success: false,
+					Output:  fmt.Sprintf("function_call failed: unknown name of function : %s", toolCall.Name),
+				}
+				step.ToolResults = append(step.ToolResults, core.ToolResult{
+					CallID:      toolCall.CallID,
+					Observation: observation,
+				})
+				functionCallOutputJSON, err := buildFunctionCallOutputJSON(toolCall.CallID, observation)
+				if err != nil {
+					return err
+				}
 
-		if decision.Type == core.DecisionFinish {
+				state.Transcript = append(state.Transcript, functionCallOutputJSON)
+			} else {
+
+				observation, err := t.Execute(ctx, runCtx, toolCall.RawArgs)
+				if err != nil {
+					return err
+				}
+				observation.Output = core.SanitizePath(observation.Output, runCtx.RepoAbs)
+				step.ToolResults = append(step.ToolResults, core.ToolResult{
+					CallID:      toolCall.CallID,
+					Observation: observation,
+				})
+				fmt.Printf("[step %d]result: %+v\n", s+1, observation)
+
+				functionCallOutputJSON, err := buildFunctionCallOutputJSON(toolCall.CallID, observation)
+				if err != nil {
+					return err
+				}
+
+				state.Transcript = append(state.Transcript, functionCallOutputJSON)
+			}
+		}
+		if len(turn.ToolCalls) == 0 && turn.FinalAnswer != "" {
+			state.History = append(state.History, step)
 			return nil
 		}
-
-		t, ok := tools[string(decision.ToolCall.Name)]
-		if !ok {
-			return fmt.Errorf("unknown tools: %s", decision.ToolCall.Name)
-		}
-
-		observation, _ := t.Execute(ctx, decision.ToolCall.Args)
-		fmt.Printf("[step %d]result: %+v\n", step+1, observation)
-
-		state.History = append(state.History, core.Step{
-			Decision:    decision,
-			Observation: observation,
-		})
-
+		state.History = append(state.History, step)
 	}
 	return fmt.Errorf("max steps reached")
 
