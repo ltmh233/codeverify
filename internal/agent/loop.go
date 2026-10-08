@@ -16,13 +16,10 @@ func Run(ctx context.Context, a Agent, state *core.State, runCtx core.RunContext
 			return err
 		}
 		step := core.Step{
-			Turn: core.Turn{
-				Reasonings: turn.Reasonings,
-				ToolCalls:  []*core.ToolCall{},
-			},
+			Turn:        turn,
 			ToolResults: []core.ToolResult{},
 		}
-		for _, toolCall := range turn.ToolCalls {
+		for _, toolCall := range step.Turn.ToolCalls {
 			fmt.Printf("[step %d]toolCall: %+v\n", s+1, toolCall.Name)
 			step.Turn.ToolCalls = append(step.Turn.ToolCalls, toolCall)
 
@@ -63,7 +60,7 @@ func Run(ctx context.Context, a Agent, state *core.State, runCtx core.RunContext
 				state.Transcript = append(state.Transcript, functionCallOutputJSON)
 			}
 		}
-		if len(turn.ToolCalls) == 0 && turn.FinalAnswer != "" {
+		if len(step.Turn.ToolCalls) == 0 && step.Turn.FinalAnswer != "" {
 			state.History = append(state.History, step)
 			return nil
 		}

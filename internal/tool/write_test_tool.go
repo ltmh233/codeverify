@@ -91,7 +91,7 @@ func (t *WriteTestTool) Spec() *responses.ToolUnionParam {
 				"additionalProperties": false,
 			},
 			Name:        "write_file",
-			Description: openai.String("Write a test file by path, path must end with _test.go"),
+			Description: openai.String("Write a test file by path, path must end with _test.go, full code passing by argument content"),
 		},
 	}
 }
