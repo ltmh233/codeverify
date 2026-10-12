@@ -10,10 +10,12 @@ import (
 type ToolName string
 
 const (
-	ToolReadFile  ToolName = "read_file"
-	ToolWriteFile ToolName = "write_file"
-	ToolRunTest   ToolName = "run_test"
-	ToolReadDir   ToolName = "read_dir"
+	ToolReadFile      ToolName = "read_file"
+	ToolWriteFile     ToolName = "write_file"
+	ToolRunTest       ToolName = "run_test"
+	ToolReadDir       ToolName = "read_dir"
+	ToolRecordRisk    ToolName = "record_risk"
+	ToolSubmitVerdict ToolName = "submit_verdict"
 )
 
 type ToolCall struct {
@@ -38,6 +40,7 @@ type ToolReadFileArguments struct {
 type RunContext struct {
 	RepoPath string
 	RepoAbs  string
+	State    *State
 }
 
 // 判断给定路径是否超出目标仓库路径

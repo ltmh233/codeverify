@@ -64,13 +64,14 @@ func (t *ReadFileTool) Spec() *responses.ToolUnionParam {
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
-						"type": "string",
+						"type":        "string",
+						"description": "the file path want to read",
 					},
 				},
 				"required":             []string{"path"},
 				"additionalProperties": false,
 			},
-			Name:        "read_file",
+			Name:        string(core.ToolReadFile),
 			Description: openai.String("Read a file from the repository by path"),
 		},
 	}

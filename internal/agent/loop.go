@@ -7,11 +7,11 @@ import (
 	"fmt"
 )
 
-func Run(ctx context.Context, a Agent, state *core.State, runCtx core.RunContext, tools map[string]tool.Tool) error {
+func Run(ctx context.Context, a Agent, runCtx core.RunContext, tools *tool.Registry) error {
 	const maxSteps = 100
 
 	for s := range maxSteps {
-		turn, err := a.Decide(ctx, state)
+		turn, err := a.Decide(ctx, runCtx.State, *tools)
 		if err != nil {
 			return err
 		}
@@ -21,9 +21,8 @@ func Run(ctx context.Context, a Agent, state *core.State, runCtx core.RunContext
 		}
 		for _, toolCall := range step.Turn.ToolCalls {
 			fmt.Printf("[step %d]toolCall: %+v\n", s+1, toolCall.Name)
-			step.Turn.ToolCalls = append(step.Turn.ToolCalls, toolCall)
 
-			t, ok := tools[string(toolCall.Name)]
+			t, ok := tools.GetTool(string(toolCall.Name))
 			if !ok {
 				observation := core.Observation{
 					Success: false,
@@ -38,7 +37,7 @@ func Run(ctx context.Context, a Agent, state *core.State, runCtx core.RunContext
 					return err
 				}
 
-				state.Transcript = append(state.Transcript, functionCallOutputJSON)
+				runCtx.State.Transcript = append(runCtx.State.Transcript, functionCallOutputJSON)
 			} else {
 
 				observation, err := t.Execute(ctx, runCtx, toolCall.RawArgs)
@@ -46,6 +45,9 @@ func Run(ctx context.Context, a Agent, state *core.State, runCtx core.RunContext
 					return err
 				}
 				observation.Output = core.SanitizePath(observation.Output, runCtx.RepoAbs)
+				if t.Name() == core.ToolRunTest {
+					observation.Output = fmt.Sprintf("evidence_id: %s,\n %s", toolCall.CallID, observation.Output)
+				}
 				step.ToolResults = append(step.ToolResults, core.ToolResult{
 					CallID:      toolCall.CallID,
 					Observation: observation,
@@ -57,14 +59,14 @@ func Run(ctx context.Context, a Agent, state *core.State, runCtx core.RunContext
 					return err
 				}
 
-				state.Transcript = append(state.Transcript, functionCallOutputJSON)
+				runCtx.State.Transcript = append(runCtx.State.Transcript, functionCallOutputJSON)
 			}
 		}
 		if len(step.Turn.ToolCalls) == 0 && step.Turn.FinalAnswer != "" {
-			state.History = append(state.History, step)
+			runCtx.State.History = append(runCtx.State.History, step)
 			return nil
 		}
-		state.History = append(state.History, step)
+		runCtx.State.History = append(runCtx.State.History, step)
 	}
 	return fmt.Errorf("max steps reached")
 

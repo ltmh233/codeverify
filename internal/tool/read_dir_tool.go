@@ -83,13 +83,14 @@ func (t *ReadDirTool) Spec() *responses.ToolUnionParam {
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
-						"type": "string",
+						"type":        "string",
+						"description": "the path want to list",
 					},
 				},
 				"required":             []string{"path"},
 				"additionalProperties": false,
 			},
-			Name:        "read_dir",
+			Name:        string(core.ToolReadDir),
 			Description: openai.String("Read the detials of the dir of current repository"),
 		},
 	}

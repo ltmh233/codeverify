@@ -22,6 +22,7 @@ func main() {
 		Goal:       "review code and generator tests",
 		History:    []core.Step{},
 		Transcript: []json.RawMessage{},
+		Risks:      map[string]*core.Risk{},
 	}
 
 	systemInputMessage, err := agent.BuildInputMessageJSON(`
@@ -59,18 +60,17 @@ func main() {
 	runCtx := core.RunContext{
 		RepoPath: repoPath,
 		RepoAbs:  repoAbs,
+		State:    &state,
 	}
-	tools := map[string]tool.Tool{
-		"read_file":  &tool.ReadFileTool{},
-		"write_file": &tool.WriteTestTool{},
-		"run_test":   &tool.RunTestTool{},
-		"read_dir":   &tool.ReadDirTool{},
-	}
-	for _, tool := range tools {
-		a.RegisterTool(tool.Spec())
-	}
+	tools := tool.Registry{}
+	tools.Register(&tool.ReadDirTool{})
+	tools.Register(&tool.ReadFileTool{})
+	tools.Register(&tool.RecordRiskTool{})
+	tools.Register(&tool.RunTestTool{})
+	tools.Register(&tool.WriteTestTool{})
+	tools.Register(&tool.SubmitVerdictTool{})
 
-	err = agent.Run(ctx, a, &state, runCtx, tools)
+	err = agent.Run(ctx, a, runCtx, &tools)
 	if err != nil {
 		fmt.Printf("error occur while agent run: %v", err)
 	}

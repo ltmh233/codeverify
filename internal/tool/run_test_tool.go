@@ -36,7 +36,7 @@ func (t *RunTestTool) Spec() *responses.ToolUnionParam {
 				"properties":           map[string]any{},
 				"additionalProperties": false,
 			},
-			Name:        "run_test",
+			Name:        string(core.ToolRunTest),
 			Description: openai.String("Run all go test in current repository"),
 		},
 	}

@@ -81,17 +81,19 @@ func (t *WriteTestTool) Spec() *responses.ToolUnionParam {
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
-						"type": "string",
+						"type":        "string",
+						"description": "the file path want to write",
 					},
 					"content": map[string]any{
-						"type": "string",
+						"type":        "string",
+						"description": "the content want to write",
 					},
 				},
 				"required":             []string{"path", "content"},
 				"additionalProperties": false,
 			},
-			Name:        "write_file",
-			Description: openai.String("Write a test file by path, path must end with _test.go, full code passing by argument content"),
+			Name:        string(core.ToolWriteFile),
+			Description: openai.String("Write a test file by path, path must end with _test.go"),
 		},
 	}
 }
