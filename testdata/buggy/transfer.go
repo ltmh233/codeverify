@@ -11,3 +11,25 @@ func Transfer(src, dst *Account, amount int64) error {
 	dst.Balance += amount
 	return nil
 }
+
+func Process(a *Account, u *User) {
+	a.Save()
+	u.Save()
+}
+
+func A() {
+	B()
+	C()
+}
+
+func B() {
+	D()
+}
+
+func C() {
+	D()
+}
+
+func D() {
+	A()
+}

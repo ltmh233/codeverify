@@ -13,6 +13,7 @@ type State struct {
 	Transcript []json.RawMessage
 	Risks      map[string]*Risk
 	nextRiskID int
+	TurnStarts []int
 }
 
 func (s *State) AddRisk(hypothesis string, contract string) *Risk {
@@ -23,7 +24,7 @@ func (s *State) AddRisk(hypothesis string, contract string) *Risk {
 		ID:          ID,
 		Hypothesis:  hypothesis,
 		Contract:    contract,
-		Status:      string(RiskSuspected),
+		Status:      RiskSuspected,
 		EvidenceIDs: []string{},
 	}
 	s.Risks[ID] = &risk
@@ -57,7 +58,7 @@ func (s *State) SubmitVerdict(riskID string, status string, evidenceIDs []string
 		}
 	}
 
-	s.Risks[riskID].Status = status
+	s.Risks[riskID].Status = RiskStatus(status)
 	s.Risks[riskID].EvidenceIDs = append([]string{}, evidenceIDs...)
 	s.Risks[riskID].VerdictReason = reason
 
@@ -74,6 +75,15 @@ func (s *State) HasVerificationResult(id string) bool {
 					}
 				}
 			}
+		}
+	}
+	return false
+}
+
+func (s *State) HasSuspectedRisk() bool {
+	for _, risk := range s.Risks {
+		if risk.Status == RiskSuspected {
+			return true
 		}
 	}
 	return false

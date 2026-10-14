@@ -5,13 +5,16 @@ import (
 	"codeverify/internal/tool"
 	"context"
 	"fmt"
+
+	"github.com/openai/openai-go/v3/responses"
 )
 
 func Run(ctx context.Context, a Agent, runCtx core.RunContext, tools *tool.Registry) error {
 	const maxSteps = 100
 
 	for s := range maxSteps {
-		turn, err := a.Decide(ctx, runCtx.State, *tools)
+		turnStart := len(runCtx.State.Transcript)
+		turn, err := a.Decide(ctx, runCtx.State, runCtx, *tools)
 		if err != nil {
 			return err
 		}
@@ -62,11 +65,22 @@ func Run(ctx context.Context, a Agent, runCtx core.RunContext, tools *tool.Regis
 				runCtx.State.Transcript = append(runCtx.State.Transcript, functionCallOutputJSON)
 			}
 		}
-		if len(step.Turn.ToolCalls) == 0 && step.Turn.FinalAnswer != "" {
-			runCtx.State.History = append(runCtx.State.History, step)
-			return nil
-		}
 		runCtx.State.History = append(runCtx.State.History, step)
+		runCtx.State.TurnStarts = append(runCtx.State.TurnStarts, turnStart)
+		if len(step.Turn.ToolCalls) == 0 && step.Turn.FinalAnswer != "" {
+			if runCtx.State.HasSuspectedRisk() {
+				message, err := BuildInputMessageJSON(
+					"Verification is incomplete: unresolved risks remain. "+
+						"Submit a verdict for each pending risk before finishing.",
+					responses.EasyInputMessageRoleUser)
+				if err != nil {
+					return err
+				}
+				runCtx.State.Transcript = append(runCtx.State.Transcript, message)
+			} else {
+				return nil
+			}
+		}
 	}
 	return fmt.Errorf("max steps reached")
 

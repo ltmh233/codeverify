@@ -70,7 +70,7 @@ func (t *SubmitVerdictTool) Spec() *responses.ToolUnionParam {
 						"items": map[string]any{
 							"type": "string",
 						},
-						"description": "Evidence Call IDs the verdict supported by",
+						"description": "Evidence_IDs the verdict supported by",
 					},
 					"reason": map[string]any{
 						"type":        "string",

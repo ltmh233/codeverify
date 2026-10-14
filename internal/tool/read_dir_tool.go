@@ -57,15 +57,39 @@ func (t *ReadDirTool) Execute(ctx context.Context, runCtx core.RunContext, rawAr
 	for i, entry := range entrys {
 		if i != len(entrys)-1 {
 			if entry.IsDir() {
-				fmt.Fprintf(&output, "[dir]%s/\n", entry.Name())
+				_, err = fmt.Fprintf(&output, "[dir]%s/\n", entry.Name())
+				if err != nil {
+					return core.Observation{
+						Success: false,
+						Output:  err.Error(),
+					}, err
+				}
 			} else {
-				fmt.Fprintf(&output, "[file]%s\n", entry.Name())
+				_, err = fmt.Fprintf(&output, "[file]%s\n", entry.Name())
+				if err != nil {
+					return core.Observation{
+						Success: false,
+						Output:  err.Error(),
+					}, err
+				}
 			}
 		} else {
 			if entry.IsDir() {
-				fmt.Fprintf(&output, "[dir]%s/", entry.Name())
+				_, err = fmt.Fprintf(&output, "[dir]%s/", entry.Name())
+				if err != nil {
+					return core.Observation{
+						Success: false,
+						Output:  err.Error(),
+					}, err
+				}
 			} else {
-				fmt.Fprintf(&output, "[file]%s", entry.Name())
+				_, err = fmt.Fprintf(&output, "[file]%s", entry.Name())
+				if err != nil {
+					return core.Observation{
+						Success: false,
+						Output:  err.Error(),
+					}, err
+				}
 			}
 		}
 	}

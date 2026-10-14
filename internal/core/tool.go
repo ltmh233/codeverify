@@ -1,6 +1,7 @@
 package core
 
 import (
+	"codeverify/internal/analysis"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ const (
 	ToolReadDir       ToolName = "read_dir"
 	ToolRecordRisk    ToolName = "record_risk"
 	ToolSubmitVerdict ToolName = "submit_verdict"
+	ToolGetCall       ToolName = "get_call"
 )
 
 type ToolCall struct {
@@ -41,6 +43,7 @@ type RunContext struct {
 	RepoPath string
 	RepoAbs  string
 	State    *State
+	Analysis *analysis.Analysis
 }
 
 // 判断给定路径是否超出目标仓库路径

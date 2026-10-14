@@ -1,0 +1,2133 @@
+[step 1]toolCall: read_dir
+[step 1]result: {Success:true Output:[file]README.md
+[dir]catalog/
+[dir]checkout/
+[file]go.mod
+[dir]pricing/
+[dir]promo/
+[dir]shipping/}
+[step 2]toolCall: read_file
+[step 2]result: {Success:true Output:# CodeVerify Call Graph Fixture
+
+这是一个用于测试 **Go Code Index、静态 Call Graph、`get_call` 工具和自主测试生成** 的独立 Go 仓库。没有外部依赖，不需要数据库或网络。
+
+## 快速运行
+
+```bash
+go test ./...
+```
+
+仓库包含 5 个 Package：
+
+- `catalog`：产品定义与查找。
+- `promo`：折扣规则与金额计算。
+- `shipping`：区域运费和免运费门槛。
+- `pricing`：组合商品、折扣与运费。
+- `checkout`：对外提供订单报价。
+
+现有测试覆盖一些常规路径，但**不保证所有业务契约都被测试覆盖**。
+
+## CodeVerify 验证任务
+
+请对整个仓库进行自主代码验证：
+
+- 利用 Repository Overview 找到值得检查的入口。
+- 在探索复杂调用链时使用 `get_call` 查询静态调用关系，按需阅读实现文件，而不是假设工具结果包含完整源码。
+- 从代码注释中寻找可测试的业务契约，并提出可复现的风险假设。
+- **仅允许新建或修改 `_test.go` 文件，不要修改生产代码。**
+- 用 `go test ./...` 等可执行结果支持 Verdict。
+
+本仓库是单线程内存模型；不测并发、支付网关或持久化。金额单位统一为分（cents）。
+
+> 这是一个盲测样例：README 不透露预埋缺陷的位置或触发输入。
+}
+[step 2]toolCall: read_file
+[step 2]result: {Success:true Output:module example.com/codeverify-callgraph-fixture
+
+go 1.22
+}
+[step 3]toolCall: read_dir
+[step 3]result: {Success:true Output:[file]catalog.go
+[file]catalog_test.go}
+[step 3]toolCall: read_dir
+[step 3]result: {Success:true Output:[file]promo.go
+[file]promo_test.go}
+[step 3]toolCall: read_dir
+[step 3]result: {Success:true Output:[file]shipping.go
+[file]shipping_test.go}
+[step 3]toolCall: read_dir
+[step 3]result: {Success:true Output:[file]pricing.go
+[file]pricing_test.go}
+[step 3]toolCall: read_dir
+[step 3]result: {Success:true Output:[file]checkout.go
+[file]checkout_test.go}
+[step 4]toolCall: read_file
+[step 4]result: {Success:true Output:// Package catalog stores items available for purchase.
+package catalog
+
+import (
+	"errors"
+	"sort"
+	"strings"
+)
+
+var (
+	ErrInvalidProduct = errors.New("invalid catalog product")
+	ErrDuplicateSKU   = errors.New("duplicate SKU")
+	ErrUnknownSKU     = errors.New("unknown SKU")
+	ErrUnavailable    = errors.New("product unavailable")
+)
+
+// Product uses integer cents to avoid floating-point pricing errors.
+type Product struct {
+	SKU        string
+	Title      string
+	PriceCents int64
+	Active     bool
+}
+
+// Validate checks the basic product definition.
+func (p Product) Validate() error {
+	if strings.TrimSpace(p.SKU) == "" || p.PriceCents <= 0 || p.PriceCents > 1_000_000 {
+		return ErrInvalidProduct
+	}
+	return nil
+}
+
+func (p Product) Label() string {
+	if p.Title != "" {
+		return p.Title
+	}
+	return p.SKU
+}
+
+type Catalog struct {
+	products map[string]Product
+}
+
+func NewCatalog(products []Product) (*Catalog, error) {
+	c := &Catalog{products: make(map[string]Product, len(products))}
+	for _, p := range products {
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+		if _, exists := c.products[p.SKU]; exists {
+			return nil, ErrDuplicateSKU
+		}
+		c.products[p.SKU] = p
+	}
+	return c, nil
+}
+
+// Lookup returns only active products.
+func (c *Catalog) Lookup(sku string) (Product, error) {
+	p, ok := c.products[sku]
+	if !ok {
+		return Product{}, ErrUnknownSKU
+	}
+	if !p.Active {
+		return Product{}, ErrUnavailable
+	}
+	return p, nil
+}
+
+func (c *Catalog) Count() int { return len(c.products) }
+
+func (c *Catalog) Has(sku string) bool {
+	_, ok := c.products[sku]
+	return ok
+}
+
+// SKUs returns catalog keys in stable order; this is an administrative helper.
+func (c *Catalog) SKUs() []string {
+	ids := make([]string, 0, len(c.products))
+	for id := range c.products {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+}
+[step 4]toolCall: read_file
+[step 4]result: {Success:true Output:// Package promo applies percentage-based promotional rules.
+package promo
+
+import (
+	"errors"
+	"sort"
+	"strings"
+)
+
+var (
+	ErrInvalidRule = errors.New("invalid promotion rule")
+	ErrUnknownCode = errors.New("unknown promotion code")
+	ErrBadSubtotal = errors.New("subtotal must be non-negative")
+)
+
+type Rule struct {
+	Code             string
+	Percent          int
+	MinSubtotalCents int64
+	MaxDiscountCents int64 // Zero means no cap.
+}
+
+func (r Rule) Validate() error {
+	if strings.TrimSpace(r.Code) == "" || r.Percent <= 0 || r.Percent > 80 || r.MinSubtotalCents < 0 || r.MaxDiscountCents < 0 {
+		return ErrInvalidRule
+	}
+	return nil
+}
+
+func (r Rule) Eligible(subtotalCents int64) bool {
+	return subtotalCents >= r.MinSubtotalCents
+}
+
+type Engine struct {
+	rules map[string]Rule
+}
+
+func NewEngine(rules []Rule) (*Engine, error) {
+	e := &Engine{rules: make(map[string]Rule, len(rules))}
+	for _, r := range rules {
+		if err := r.Validate(); err != nil {
+			return nil, err
+		}
+		if _, duplicate := e.rules[r.Code]; duplicate {
+			return nil, ErrInvalidRule
+		}
+		e.rules[r.Code] = r
+	}
+	return e, nil
+}
+
+func (e *Engine) Lookup(code string) (Rule, error) {
+	r, ok := e.rules[code]
+	if !ok {
+		return Rule{}, ErrUnknownCode
+	}
+	return r, nil
+}
+
+// Discount returns the discount on the merchandise subtotal, in cents.
+// An empty code means no promotion.
+func (e *Engine) Discount(code string, subtotalCents int64) (int64, error) {
+	if subtotalCents < 0 {
+		return 0, ErrBadSubtotal
+	}
+	if code == "" {
+		return 0, nil
+	}
+	r, err := e.Lookup(code)
+	if err != nil {
+		return 0, err
+	}
+	if !r.Eligible(subtotalCents) {
+		return 0, nil
+	}
+	return limitDiscount(percentOff(subtotalCents, r.Percent), r.MaxDiscountCents), nil
+}
+
+func percentOff(amount int64, percent int) int64 {
+	return amount * int64(percent) / 100
+}
+
+func limitDiscount(discount, cap int64) int64 {
+	if cap > 0 && discount > cap {
+		return cap
+	}
+	return discount
+}
+
+// Codes is a utility for displaying configured promotional codes.
+func (e *Engine) Codes() []string {
+	codes := make([]string, 0, len(e.rules))
+	for code := range e.rules {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	return codes
+}
+}
+[step 4]toolCall: read_file
+[step 4]result: {Success:true Output:// Package shipping calculates shipping fees for different regions.
+package shipping
+
+import "errors"
+
+var (
+	ErrInvalidRates  = errors.New("invalid shipping rates")
+	ErrUnknownZone   = errors.New("unknown shipping zone")
+	ErrInvalidAmount = errors.New("negative merchandise amount")
+)
+
+type Zone string
+
+const (
+	Domestic      Zone = "domestic"
+	International Zone = "international"
+)
+
+type Calculator struct {
+	domesticFlatCents      int64
+	internationalFlatCents int64
+	freeThresholdCents     int64
+}
+
+func NewCalculator(domesticFlat, internationalFlat, freeThreshold int64) (*Calculator, error) {
+	if domesticFlat < 0 || internationalFlat < 0 || freeThreshold <= 0 {
+		return nil, ErrInvalidRates
+	}
+	return &Calculator{
+		domesticFlatCents:      domesticFlat,
+		internationalFlatCents: internationalFlat,
+		freeThresholdCents:     freeThreshold,
+	}, nil
+}
+
+// Fee computes delivery cost from the PAYABLE merchandise amount,
+// AFTER applying all discounts. Domestic shipping is free when that amount
+// reaches the configured threshold; international delivery has a flat fee.
+func (c *Calculator) Fee(payableMerchandiseCents int64, zone Zone) (int64, error) {
+	if payableMerchandiseCents < 0 {
+		return 0, ErrInvalidAmount
+	}
+	switch zone {
+	case Domestic:
+		return c.domesticFee(payableMerchandiseCents), nil
+	case International:
+		return c.internationalFee(), nil
+	default:
+		return 0, ErrUnknownZone
+	}
+}
+
+func (c *Calculator) domesticFee(payableMerchandiseCents int64) int64 {
+	if c.EligibleForFreeDomestic(payableMerchandiseCents) {
+		return 0
+	}
+	return c.domesticFlatCents
+}
+
+func (c *Calculator) internationalFee() int64 {
+	return c.internationalFlatCents
+}
+
+func (c *Calculator) EligibleForFreeDomestic(payableMerchandiseCents int64) bool {
+	return payableMerchandiseCents >= c.freeThresholdCents
+}
+
+func (c *Calculator) Threshold() int64 { return c.freeThresholdCents }
+
+func SupportedZones() []Zone { return []Zone{Domestic, International} }
+}
+[step 4]toolCall: read_file
+[step 4]result: {Success:true Output:// Package pricing combines merchandise, promotion and shipping calculations.
+package pricing
+
+import (
+	"errors"
+
+	"example.com/codeverify-callgraph-fixture/catalog"
+	"example.com/codeverify-callgraph-fixture/promo"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+var (
+	ErrInvalidLines  = errors.New("invalid cart lines")
+	ErrNilDependency = errors.New("missing pricing dependency")
+)
+
+type Line struct {
+	SKU      string
+	Quantity int
+}
+
+type Quote struct {
+	SubtotalCents int64
+	DiscountCents int64
+	ShippingCents int64
+	TotalCents    int64
+}
+
+func (q Quote) PayableMerchandiseCents() int64 {
+	return q.SubtotalCents - q.DiscountCents
+}
+
+func (q Quote) SavedCents() int64 { return q.DiscountCents }
+
+func (q Quote) ValidateTotals() bool {
+	return q.TotalCents == q.PayableMerchandiseCents()+q.ShippingCents
+}
+
+type Engine struct {
+	catalog  *catalog.Catalog
+	promos   *promo.Engine
+	shipping *shipping.Calculator
+}
+
+func NewEngine(c *catalog.Catalog, p *promo.Engine, s *shipping.Calculator) (*Engine, error) {
+	if c == nil || p == nil || s == nil {
+		return nil, ErrNilDependency
+	}
+	return &Engine{catalog: c, promos: p, shipping: s}, nil
+}
+
+// Quote computes merchandise subtotal, promotion discount and delivery fee.
+// Shipping eligibility must use the discounted, payable merchandise amount.
+func (e *Engine) Quote(lines []Line, promotionCode string, zone shipping.Zone) (Quote, error) {
+	subtotal, err := e.sumLines(lines)
+	if err != nil {
+		return Quote{}, err
+	}
+	discount, err := e.calculateDiscount(promotionCode, subtotal)
+	if err != nil {
+		return Quote{}, err
+	}
+	return e.completeQuote(subtotal, discount, zone)
+}
+
+func (e *Engine) sumLines(lines []Line) (int64, error) {
+	if len(lines) == 0 || len(lines) > 20 {
+		return 0, ErrInvalidLines
+	}
+	var subtotal int64
+	for _, line := range lines {
+		if line.Quantity <= 0 || line.Quantity > 100 {
+			return 0, ErrInvalidLines
+		}
+		item, err := e.catalog.Lookup(line.SKU)
+		if err != nil {
+			return 0, err
+		}
+		subtotal += item.PriceCents * int64(line.Quantity)
+	}
+	return subtotal, nil
+}
+
+func (e *Engine) calculateDiscount(code string, subtotal int64) (int64, error) {
+	return e.promos.Discount(code, subtotal)
+}
+
+func (e *Engine) completeQuote(subtotal, discount int64, zone shipping.Zone) (Quote, error) {
+	payable := subtotal - discount
+	if payable < 0 {
+		return Quote{}, ErrInvalidLines
+	}
+
+	// Delivery is calculated separately from promotion eligibility.
+	fee, err := e.shipping.Fee(subtotal, zone)
+	if err != nil {
+		return Quote{}, err
+	}
+	return Quote{
+		SubtotalCents: subtotal,
+		DiscountCents: discount,
+		ShippingCents: fee,
+		TotalCents:    payable + fee,
+	}, nil
+}
+}
+[step 4]toolCall: read_file
+[step 4]result: {Success:true Output:// Package checkout exposes customer-facing quote operations.
+package checkout
+
+import (
+	"errors"
+	"fmt"
+
+	"example.com/codeverify-callgraph-fixture/pricing"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+var (
+	ErrNoPricingEngine = errors.New("checkout pricing engine is required")
+	ErrEmptyCart       = errors.New("cart must contain at least one item")
+)
+
+type Request struct {
+	Lines     []pricing.Line
+	PromoCode string
+	Zone      shipping.Zone
+}
+
+type Service struct {
+	pricing *pricing.Engine
+}
+
+func NewService(engine *pricing.Engine) (*Service, error) {
+	if engine == nil {
+		return nil, ErrNoPricingEngine
+	}
+	return &Service{pricing: engine}, nil
+}
+
+// Quote returns the amount a customer should pay for an order.
+// Domestic free-shipping eligibility is based on merchandise AFTER discounts,
+// not the original price. Quote must satisfy this rule for all valid requests.
+func (s *Service) Quote(req Request) (pricing.Quote, error) {
+	if err := validateRequest(req); err != nil {
+		return pricing.Quote{}, err
+	}
+	return s.pricing.Quote(req.Lines, req.PromoCode, req.Zone)
+}
+
+func validateRequest(req Request) error {
+	if len(req.Lines) == 0 {
+		return ErrEmptyCart
+	}
+	return nil
+}
+
+// Preview is a presentation helper, not a payment operation.
+func (s *Service) Preview(req Request) (string, error) {
+	q, err := s.Quote(req)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("total=%d discount=%d shipping=%d", q.TotalCents, q.DiscountCents, q.ShippingCents), nil
+}
+
+func (s *Service) IsFreeDelivery(req Request) (bool, error) {
+	q, err := s.Quote(req)
+	if err != nil {
+		return false, err
+	}
+	return q.ShippingCents == 0, nil
+}
+
+func LineCount(req Request) int { return len(req.Lines) }
+}
+[step 5]toolCall: read_file
+[step 5]result: {Success:true Output:package catalog
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestCatalogLookup(t *testing.T) {
+	c, err := NewCatalog([]Product{{SKU: "pen", PriceCents: 1500, Active: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Lookup("pen")
+	if err != nil || got.PriceCents != 1500 {
+		t.Fatalf("Lookup(pen) = %+v, %v", got, err)
+	}
+	if _, err := c.Lookup("missing"); !errors.Is(err, ErrUnknownSKU) {
+		t.Fatalf("unknown SKU error = %v", err)
+	}
+}
+
+func TestDuplicateSKU(t *testing.T) {
+	_, err := NewCatalog([]Product{
+		{SKU: "pen", PriceCents: 1500, Active: true},
+		{SKU: "pen", PriceCents: 1500, Active: true},
+	})
+	if !errors.Is(err, ErrDuplicateSKU) {
+		t.Fatalf("duplicate SKU error = %v", err)
+	}
+}
+}
+[step 5]toolCall: read_file
+[step 5]result: {Success:true Output:package promo
+
+import "testing"
+
+func TestDiscountAndCap(t *testing.T) {
+	e, err := NewEngine([]Rule{{Code: "SAVE25", Percent: 25, MinSubtotalCents: 5000, MaxDiscountCents: 4000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ subtotal, want int64 }{{4000, 0}, {12000, 3000}, {20000, 4000}} {
+		got, err := e.Discount("SAVE25", tc.subtotal)
+		if err != nil || got != tc.want {
+			t.Fatalf("Discount(%d) = %d, %v, want %d", tc.subtotal, got, err, tc.want)
+		}
+	}
+}
+
+func TestEmptyCode(t *testing.T) {
+	e, err := NewEngine(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Discount("", 1234)
+	if err != nil || got != 0 {
+		t.Fatalf("Discount(empty) = %d, %v", got, err)
+	}
+}
+}
+[step 5]toolCall: read_file
+[step 5]result: {Success:true Output:package shipping
+
+import "testing"
+
+func TestDomesticShippingThreshold(t *testing.T) {
+	c, err := NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ payable, want int64 }{{9000, 1200}, {9999, 1200}, {10000, 0}, {11000, 0}} {
+		got, err := c.Fee(tc.payable, Domestic)
+		if err != nil || got != tc.want {
+			t.Fatalf("Fee(%d,domestic) = %d, %v, want %d", tc.payable, got, err, tc.want)
+		}
+	}
+}
+
+func TestInternationalFlatFee(t *testing.T) {
+	c, err := NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Fee(50000, International)
+	if err != nil || got != 2500 {
+		t.Fatalf("Fee(international) = %d, %v", got, err)
+	}
+}
+}
+[step 5]toolCall: read_file
+[step 5]result: {Success:true Output:package pricing
+
+import (
+	"example.com/codeverify-callgraph-fixture/catalog"
+	"example.com/codeverify-callgraph-fixture/promo"
+	"example.com/codeverify-callgraph-fixture/shipping"
+	"testing"
+)
+
+func newPricingEngine(t *testing.T) *Engine {
+	t.Helper()
+	c, err := catalog.NewCatalog([]catalog.Product{
+		{SKU: "keyboard", PriceCents: 12000, Active: true},
+		{SKU: "pen", PriceCents: 1500, Active: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := promo.NewEngine([]promo.Rule{{Code: "SAVE25", Percent: 25}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := shipping.NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := NewEngine(c, p, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestQuoteNoPromotion(t *testing.T) {
+	e := newPricingEngine(t)
+	q, err := e.Quote([]Line{{SKU: "pen", Quantity: 2}}, "", shipping.Domestic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.SubtotalCents != 3000 || q.DiscountCents != 0 || q.ShippingCents != 1200 || q.TotalCents != 4200 {
+		t.Fatalf("quote = %+v", q)
+	}
+	if !q.ValidateTotals() {
+		t.Fatal("inconsistent quote fields")
+	}
+}
+
+func TestQuoteDiscountStillAboveThreshold(t *testing.T) {
+	e := newPricingEngine(t)
+	q, err := e.Quote([]Line{{SKU: "keyboard", Quantity: 2}}, "SAVE25", shipping.Domestic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.SubtotalCents != 24000 || q.DiscountCents != 6000 || q.ShippingCents != 0 || q.TotalCents != 18000 {
+		t.Fatalf("quote = %+v", q)
+	}
+}
+}
+[step 5]toolCall: read_file
+[step 5]result: {Success:true Output:package checkout
+
+import (
+	"errors"
+	"testing"
+
+	"example.com/codeverify-callgraph-fixture/catalog"
+	"example.com/codeverify-callgraph-fixture/pricing"
+	"example.com/codeverify-callgraph-fixture/promo"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+func newCheckoutService(t *testing.T) *Service {
+	t.Helper()
+	c, err := catalog.NewCatalog([]catalog.Product{
+		{SKU: "keyboard", PriceCents: 12000, Active: true},
+		{SKU: "notebook", PriceCents: 6000, Active: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := promo.NewEngine([]promo.Rule{{Code: "SAVE25", Percent: 25}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := shipping.NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := pricing.NewEngine(c, p, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func TestCheckoutQuoteNoPromotion(t *testing.T) {
+	s := newCheckoutService(t)
+	q, err := s.Quote(Request{Lines: []pricing.Line{{SKU: "notebook", Quantity: 1}}, Zone: shipping.Domestic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.TotalCents != 7200 {
+		t.Fatalf("TotalCents = %d, want 7200", q.TotalCents)
+	}
+}
+
+func TestCheckoutQuoteInternational(t *testing.T) {
+	s := newCheckoutService(t)
+	q, err := s.Quote(Request{Lines: []pricing.Line{{SKU: "keyboard", Quantity: 1}}, Zone: shipping.International})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.TotalCents != 14500 {
+		t.Fatalf("TotalCents = %d, want 14500", q.TotalCents)
+	}
+}
+
+func TestCheckoutRejectsEmptyCart(t *testing.T) {
+	s := newCheckoutService(t)
+	_, err := s.Quote(Request{Zone: shipping.Domestic})
+	if !errors.Is(err, ErrEmptyCart) {
+		t.Fatalf("empty cart error = %v", err)
+	}
+}
+}
+[step 6]toolCall: record_risk
+[step 6]result: {Success:true Output:riskID:R1 ,riskStatus:suspected}
+[step 6]toolCall: get_call
+[step 6]result: {Success:false Output:pricing.Engine.completeQuote function not exists}
+[step 7]toolCall: get_call
+[step 7]result: {Success:false Output:example.com/codeverify-callgraph-fixture/pricing.Engine.completeQuote function not exists}
+[step 8]toolCall: write_file
+[step 8]result: {Success:true Output:write ./pricing/pricing_verify_test.go success}
+[step 9]toolCall: run_test
+[step 9]result: {Success:false Output:evidence_id: call_00_4LBld5s7hJagwRezBpQH9272,
+ ok  	example.com/codeverify-callgraph-fixture/catalog	(cached)
+ok  	example.com/codeverify-callgraph-fixture/checkout	(cached)
+--- FAIL: TestVerifyFreeShippingUsesPayable (0.00s)
+    pricing_verify_test.go:46: ShippingCents = 0, want 1200 (payable 9000 < threshold 10000)
+FAIL
+FAIL	example.com/codeverify-callgraph-fixture/pricing	0.425s
+ok  	example.com/codeverify-callgraph-fixture/promo	(cached)
+ok  	example.com/codeverify-callgraph-fixture/shipping	(cached)
+FAIL
+}
+[step 10]toolCall: submit_verdict
+[step 10]result: {Success:true Output:update risk R1 status to confirmed}
+[step 11]toolCall: read_file
+[step 11]result: {Success:true Output:// Package catalog stores items available for purchase.
+package catalog
+
+import (
+	"errors"
+	"sort"
+	"strings"
+)
+
+var (
+	ErrInvalidProduct = errors.New("invalid catalog product")
+	ErrDuplicateSKU   = errors.New("duplicate SKU")
+	ErrUnknownSKU     = errors.New("unknown SKU")
+	ErrUnavailable    = errors.New("product unavailable")
+)
+
+// Product uses integer cents to avoid floating-point pricing errors.
+type Product struct {
+	SKU        string
+	Title      string
+	PriceCents int64
+	Active     bool
+}
+
+// Validate checks the basic product definition.
+func (p Product) Validate() error {
+	if strings.TrimSpace(p.SKU) == "" || p.PriceCents <= 0 || p.PriceCents > 1_000_000 {
+		return ErrInvalidProduct
+	}
+	return nil
+}
+
+func (p Product) Label() string {
+	if p.Title != "" {
+		return p.Title
+	}
+	return p.SKU
+}
+
+type Catalog struct {
+	products map[string]Product
+}
+
+func NewCatalog(products []Product) (*Catalog, error) {
+	c := &Catalog{products: make(map[string]Product, len(products))}
+	for _, p := range products {
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+		if _, exists := c.products[p.SKU]; exists {
+			return nil, ErrDuplicateSKU
+		}
+		c.products[p.SKU] = p
+	}
+	return c, nil
+}
+
+// Lookup returns only active products.
+func (c *Catalog) Lookup(sku string) (Product, error) {
+	p, ok := c.products[sku]
+	if !ok {
+		return Product{}, ErrUnknownSKU
+	}
+	if !p.Active {
+		return Product{}, ErrUnavailable
+	}
+	return p, nil
+}
+
+func (c *Catalog) Count() int { return len(c.products) }
+
+func (c *Catalog) Has(sku string) bool {
+	_, ok := c.products[sku]
+	return ok
+}
+
+// SKUs returns catalog keys in stable order; this is an administrative helper.
+func (c *Catalog) SKUs() []string {
+	ids := make([]string, 0, len(c.products))
+	for id := range c.products {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+}
+[step 11]toolCall: read_file
+[step 11]result: {Success:true Output:// Package promo applies percentage-based promotional rules.
+package promo
+
+import (
+	"errors"
+	"sort"
+	"strings"
+)
+
+var (
+	ErrInvalidRule = errors.New("invalid promotion rule")
+	ErrUnknownCode = errors.New("unknown promotion code")
+	ErrBadSubtotal = errors.New("subtotal must be non-negative")
+)
+
+type Rule struct {
+	Code             string
+	Percent          int
+	MinSubtotalCents int64
+	MaxDiscountCents int64 // Zero means no cap.
+}
+
+func (r Rule) Validate() error {
+	if strings.TrimSpace(r.Code) == "" || r.Percent <= 0 || r.Percent > 80 || r.MinSubtotalCents < 0 || r.MaxDiscountCents < 0 {
+		return ErrInvalidRule
+	}
+	return nil
+}
+
+func (r Rule) Eligible(subtotalCents int64) bool {
+	return subtotalCents >= r.MinSubtotalCents
+}
+
+type Engine struct {
+	rules map[string]Rule
+}
+
+func NewEngine(rules []Rule) (*Engine, error) {
+	e := &Engine{rules: make(map[string]Rule, len(rules))}
+	for _, r := range rules {
+		if err := r.Validate(); err != nil {
+			return nil, err
+		}
+		if _, duplicate := e.rules[r.Code]; duplicate {
+			return nil, ErrInvalidRule
+		}
+		e.rules[r.Code] = r
+	}
+	return e, nil
+}
+
+func (e *Engine) Lookup(code string) (Rule, error) {
+	r, ok := e.rules[code]
+	if !ok {
+		return Rule{}, ErrUnknownCode
+	}
+	return r, nil
+}
+
+// Discount returns the discount on the merchandise subtotal, in cents.
+// An empty code means no promotion.
+func (e *Engine) Discount(code string, subtotalCents int64) (int64, error) {
+	if subtotalCents < 0 {
+		return 0, ErrBadSubtotal
+	}
+	if code == "" {
+		return 0, nil
+	}
+	r, err := e.Lookup(code)
+	if err != nil {
+		return 0, err
+	}
+	if !r.Eligible(subtotalCents) {
+		return 0, nil
+	}
+	return limitDiscount(percentOff(subtotalCents, r.Percent), r.MaxDiscountCents), nil
+}
+
+func percentOff(amount int64, percent int) int64 {
+	return amount * int64(percent) / 100
+}
+
+func limitDiscount(discount, cap int64) int64 {
+	if cap > 0 && discount > cap {
+		return cap
+	}
+	return discount
+}
+
+// Codes is a utility for displaying configured promotional codes.
+func (e *Engine) Codes() []string {
+	codes := make([]string, 0, len(e.rules))
+	for code := range e.rules {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	return codes
+}
+}
+[step 11]toolCall: read_file
+[step 11]result: {Success:true Output:// Package shipping calculates shipping fees for different regions.
+package shipping
+
+import "errors"
+
+var (
+	ErrInvalidRates  = errors.New("invalid shipping rates")
+	ErrUnknownZone   = errors.New("unknown shipping zone")
+	ErrInvalidAmount = errors.New("negative merchandise amount")
+)
+
+type Zone string
+
+const (
+	Domestic      Zone = "domestic"
+	International Zone = "international"
+)
+
+type Calculator struct {
+	domesticFlatCents      int64
+	internationalFlatCents int64
+	freeThresholdCents     int64
+}
+
+func NewCalculator(domesticFlat, internationalFlat, freeThreshold int64) (*Calculator, error) {
+	if domesticFlat < 0 || internationalFlat < 0 || freeThreshold <= 0 {
+		return nil, ErrInvalidRates
+	}
+	return &Calculator{
+		domesticFlatCents:      domesticFlat,
+		internationalFlatCents: internationalFlat,
+		freeThresholdCents:     freeThreshold,
+	}, nil
+}
+
+// Fee computes delivery cost from the PAYABLE merchandise amount,
+// AFTER applying all discounts. Domestic shipping is free when that amount
+// reaches the configured threshold; international delivery has a flat fee.
+func (c *Calculator) Fee(payableMerchandiseCents int64, zone Zone) (int64, error) {
+	if payableMerchandiseCents < 0 {
+		return 0, ErrInvalidAmount
+	}
+	switch zone {
+	case Domestic:
+		return c.domesticFee(payableMerchandiseCents), nil
+	case International:
+		return c.internationalFee(), nil
+	default:
+		return 0, ErrUnknownZone
+	}
+}
+
+func (c *Calculator) domesticFee(payableMerchandiseCents int64) int64 {
+	if c.EligibleForFreeDomestic(payableMerchandiseCents) {
+		return 0
+	}
+	return c.domesticFlatCents
+}
+
+func (c *Calculator) internationalFee() int64 {
+	return c.internationalFlatCents
+}
+
+func (c *Calculator) EligibleForFreeDomestic(payableMerchandiseCents int64) bool {
+	return payableMerchandiseCents >= c.freeThresholdCents
+}
+
+func (c *Calculator) Threshold() int64 { return c.freeThresholdCents }
+
+func SupportedZones() []Zone { return []Zone{Domestic, International} }
+}
+[step 11]toolCall: read_file
+[step 11]result: {Success:true Output:// Package pricing combines merchandise, promotion and shipping calculations.
+package pricing
+
+import (
+	"errors"
+
+	"example.com/codeverify-callgraph-fixture/catalog"
+	"example.com/codeverify-callgraph-fixture/promo"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+var (
+	ErrInvalidLines  = errors.New("invalid cart lines")
+	ErrNilDependency = errors.New("missing pricing dependency")
+)
+
+type Line struct {
+	SKU      string
+	Quantity int
+}
+
+type Quote struct {
+	SubtotalCents int64
+	DiscountCents int64
+	ShippingCents int64
+	TotalCents    int64
+}
+
+func (q Quote) PayableMerchandiseCents() int64 {
+	return q.SubtotalCents - q.DiscountCents
+}
+
+func (q Quote) SavedCents() int64 { return q.DiscountCents }
+
+func (q Quote) ValidateTotals() bool {
+	return q.TotalCents == q.PayableMerchandiseCents()+q.ShippingCents
+}
+
+type Engine struct {
+	catalog  *catalog.Catalog
+	promos   *promo.Engine
+	shipping *shipping.Calculator
+}
+
+func NewEngine(c *catalog.Catalog, p *promo.Engine, s *shipping.Calculator) (*Engine, error) {
+	if c == nil || p == nil || s == nil {
+		return nil, ErrNilDependency
+	}
+	return &Engine{catalog: c, promos: p, shipping: s}, nil
+}
+
+// Quote computes merchandise subtotal, promotion discount and delivery fee.
+// Shipping eligibility must use the discounted, payable merchandise amount.
+func (e *Engine) Quote(lines []Line, promotionCode string, zone shipping.Zone) (Quote, error) {
+	subtotal, err := e.sumLines(lines)
+	if err != nil {
+		return Quote{}, err
+	}
+	discount, err := e.calculateDiscount(promotionCode, subtotal)
+	if err != nil {
+		return Quote{}, err
+	}
+	return e.completeQuote(subtotal, discount, zone)
+}
+
+func (e *Engine) sumLines(lines []Line) (int64, error) {
+	if len(lines) == 0 || len(lines) > 20 {
+		return 0, ErrInvalidLines
+	}
+	var subtotal int64
+	for _, line := range lines {
+		if line.Quantity <= 0 || line.Quantity > 100 {
+			return 0, ErrInvalidLines
+		}
+		item, err := e.catalog.Lookup(line.SKU)
+		if err != nil {
+			return 0, err
+		}
+		subtotal += item.PriceCents * int64(line.Quantity)
+	}
+	return subtotal, nil
+}
+
+func (e *Engine) calculateDiscount(code string, subtotal int64) (int64, error) {
+	return e.promos.Discount(code, subtotal)
+}
+
+func (e *Engine) completeQuote(subtotal, discount int64, zone shipping.Zone) (Quote, error) {
+	payable := subtotal - discount
+	if payable < 0 {
+		return Quote{}, ErrInvalidLines
+	}
+
+	// Delivery is calculated separately from promotion eligibility.
+	fee, err := e.shipping.Fee(subtotal, zone)
+	if err != nil {
+		return Quote{}, err
+	}
+	return Quote{
+		SubtotalCents: subtotal,
+		DiscountCents: discount,
+		ShippingCents: fee,
+		TotalCents:    payable + fee,
+	}, nil
+}
+}
+[step 11]toolCall: read_file
+[step 11]result: {Success:true Output:// Package checkout exposes customer-facing quote operations.
+package checkout
+
+import (
+	"errors"
+	"fmt"
+
+	"example.com/codeverify-callgraph-fixture/pricing"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+var (
+	ErrNoPricingEngine = errors.New("checkout pricing engine is required")
+	ErrEmptyCart       = errors.New("cart must contain at least one item")
+)
+
+type Request struct {
+	Lines     []pricing.Line
+	PromoCode string
+	Zone      shipping.Zone
+}
+
+type Service struct {
+	pricing *pricing.Engine
+}
+
+func NewService(engine *pricing.Engine) (*Service, error) {
+	if engine == nil {
+		return nil, ErrNoPricingEngine
+	}
+	return &Service{pricing: engine}, nil
+}
+
+// Quote returns the amount a customer should pay for an order.
+// Domestic free-shipping eligibility is based on merchandise AFTER discounts,
+// not the original price. Quote must satisfy this rule for all valid requests.
+func (s *Service) Quote(req Request) (pricing.Quote, error) {
+	if err := validateRequest(req); err != nil {
+		return pricing.Quote{}, err
+	}
+	return s.pricing.Quote(req.Lines, req.PromoCode, req.Zone)
+}
+
+func validateRequest(req Request) error {
+	if len(req.Lines) == 0 {
+		return ErrEmptyCart
+	}
+	return nil
+}
+
+// Preview is a presentation helper, not a payment operation.
+func (s *Service) Preview(req Request) (string, error) {
+	q, err := s.Quote(req)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("total=%d discount=%d shipping=%d", q.TotalCents, q.DiscountCents, q.ShippingCents), nil
+}
+
+func (s *Service) IsFreeDelivery(req Request) (bool, error) {
+	q, err := s.Quote(req)
+	if err != nil {
+		return false, err
+	}
+	return q.ShippingCents == 0, nil
+}
+
+func LineCount(req Request) int { return len(req.Lines) }
+}
+[step 12]toolCall: read_dir
+[step 12]result: {Success:true Output:[file]README.md
+[dir]catalog/
+[dir]checkout/
+[file]go.mod
+[dir]pricing/
+[dir]promo/
+[dir]shipping/}
+[step 13]toolCall: read_file
+[step 13]result: {Success:true Output:# CodeVerify Call Graph Fixture
+
+这是一个用于测试 **Go Code Index、静态 Call Graph、`get_call` 工具和自主测试生成** 的独立 Go 仓库。没有外部依赖，不需要数据库或网络。
+
+## 快速运行
+
+```bash
+go test ./...
+```
+
+仓库包含 5 个 Package：
+
+- `catalog`：产品定义与查找。
+- `promo`：折扣规则与金额计算。
+- `shipping`：区域运费和免运费门槛。
+- `pricing`：组合商品、折扣与运费。
+- `checkout`：对外提供订单报价。
+
+现有测试覆盖一些常规路径，但**不保证所有业务契约都被测试覆盖**。
+
+## CodeVerify 验证任务
+
+请对整个仓库进行自主代码验证：
+
+- 利用 Repository Overview 找到值得检查的入口。
+- 在探索复杂调用链时使用 `get_call` 查询静态调用关系，按需阅读实现文件，而不是假设工具结果包含完整源码。
+- 从代码注释中寻找可测试的业务契约，并提出可复现的风险假设。
+- **仅允许新建或修改 `_test.go` 文件，不要修改生产代码。**
+- 用 `go test ./...` 等可执行结果支持 Verdict。
+
+本仓库是单线程内存模型；不测并发、支付网关或持久化。金额单位统一为分（cents）。
+
+> 这是一个盲测样例：README 不透露预埋缺陷的位置或触发输入。
+}
+[step 13]toolCall: read_dir
+[step 13]result: {Success:true Output:[file]pricing.go
+[file]pricing_test.go
+[file]pricing_verify_test.go}
+[step 13]toolCall: read_dir
+[step 13]result: {Success:true Output:[file]checkout.go
+[file]checkout_test.go}
+[step 13]toolCall: read_dir
+[step 13]result: {Success:true Output:[file]shipping.go
+[file]shipping_test.go}
+[step 13]toolCall: read_dir
+[step 13]result: {Success:true Output:[file]promo.go
+[file]promo_test.go}
+[step 13]toolCall: read_dir
+[step 13]result: {Success:true Output:[file]catalog.go
+[file]catalog_test.go}
+[step 14]toolCall: read_file
+[step 14]result: {Success:true Output:package pricing
+
+import (
+	"example.com/codeverify-callgraph-fixture/catalog"
+	"example.com/codeverify-callgraph-fixture/promo"
+	"example.com/codeverify-callgraph-fixture/shipping"
+	"testing"
+)
+
+func newPricingEngine(t *testing.T) *Engine {
+	t.Helper()
+	c, err := catalog.NewCatalog([]catalog.Product{
+		{SKU: "keyboard", PriceCents: 12000, Active: true},
+		{SKU: "pen", PriceCents: 1500, Active: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := promo.NewEngine([]promo.Rule{{Code: "SAVE25", Percent: 25}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := shipping.NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := NewEngine(c, p, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestQuoteNoPromotion(t *testing.T) {
+	e := newPricingEngine(t)
+	q, err := e.Quote([]Line{{SKU: "pen", Quantity: 2}}, "", shipping.Domestic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.SubtotalCents != 3000 || q.DiscountCents != 0 || q.ShippingCents != 1200 || q.TotalCents != 4200 {
+		t.Fatalf("quote = %+v", q)
+	}
+	if !q.ValidateTotals() {
+		t.Fatal("inconsistent quote fields")
+	}
+}
+
+func TestQuoteDiscountStillAboveThreshold(t *testing.T) {
+	e := newPricingEngine(t)
+	q, err := e.Quote([]Line{{SKU: "keyboard", Quantity: 2}}, "SAVE25", shipping.Domestic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.SubtotalCents != 24000 || q.DiscountCents != 6000 || q.ShippingCents != 0 || q.TotalCents != 18000 {
+		t.Fatalf("quote = %+v", q)
+	}
+}
+}
+[step 14]toolCall: read_file
+[step 14]result: {Success:true Output:package checkout
+
+import (
+	"errors"
+	"testing"
+
+	"example.com/codeverify-callgraph-fixture/catalog"
+	"example.com/codeverify-callgraph-fixture/pricing"
+	"example.com/codeverify-callgraph-fixture/promo"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+func newCheckoutService(t *testing.T) *Service {
+	t.Helper()
+	c, err := catalog.NewCatalog([]catalog.Product{
+		{SKU: "keyboard", PriceCents: 12000, Active: true},
+		{SKU: "notebook", PriceCents: 6000, Active: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := promo.NewEngine([]promo.Rule{{Code: "SAVE25", Percent: 25}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := shipping.NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := pricing.NewEngine(c, p, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func TestCheckoutQuoteNoPromotion(t *testing.T) {
+	s := newCheckoutService(t)
+	q, err := s.Quote(Request{Lines: []pricing.Line{{SKU: "notebook", Quantity: 1}}, Zone: shipping.Domestic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.TotalCents != 7200 {
+		t.Fatalf("TotalCents = %d, want 7200", q.TotalCents)
+	}
+}
+
+func TestCheckoutQuoteInternational(t *testing.T) {
+	s := newCheckoutService(t)
+	q, err := s.Quote(Request{Lines: []pricing.Line{{SKU: "keyboard", Quantity: 1}}, Zone: shipping.International})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.TotalCents != 14500 {
+		t.Fatalf("TotalCents = %d, want 14500", q.TotalCents)
+	}
+}
+
+func TestCheckoutRejectsEmptyCart(t *testing.T) {
+	s := newCheckoutService(t)
+	_, err := s.Quote(Request{Zone: shipping.Domestic})
+	if !errors.Is(err, ErrEmptyCart) {
+		t.Fatalf("empty cart error = %v", err)
+	}
+}
+}
+[step 14]toolCall: read_file
+[step 14]result: {Success:true Output:package shipping
+
+import "testing"
+
+func TestDomesticShippingThreshold(t *testing.T) {
+	c, err := NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ payable, want int64 }{{9000, 1200}, {9999, 1200}, {10000, 0}, {11000, 0}} {
+		got, err := c.Fee(tc.payable, Domestic)
+		if err != nil || got != tc.want {
+			t.Fatalf("Fee(%d,domestic) = %d, %v, want %d", tc.payable, got, err, tc.want)
+		}
+	}
+}
+
+func TestInternationalFlatFee(t *testing.T) {
+	c, err := NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Fee(50000, International)
+	if err != nil || got != 2500 {
+		t.Fatalf("Fee(international) = %d, %v", got, err)
+	}
+}
+}
+[step 14]toolCall: read_file
+[step 14]result: {Success:true Output:package promo
+
+import "testing"
+
+func TestDiscountAndCap(t *testing.T) {
+	e, err := NewEngine([]Rule{{Code: "SAVE25", Percent: 25, MinSubtotalCents: 5000, MaxDiscountCents: 4000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ subtotal, want int64 }{{4000, 0}, {12000, 3000}, {20000, 4000}} {
+		got, err := e.Discount("SAVE25", tc.subtotal)
+		if err != nil || got != tc.want {
+			t.Fatalf("Discount(%d) = %d, %v, want %d", tc.subtotal, got, err, tc.want)
+		}
+	}
+}
+
+func TestEmptyCode(t *testing.T) {
+	e, err := NewEngine(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Discount("", 1234)
+	if err != nil || got != 0 {
+		t.Fatalf("Discount(empty) = %d, %v", got, err)
+	}
+}
+}
+[step 14]toolCall: read_file
+[step 14]result: {Success:true Output:package catalog
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestCatalogLookup(t *testing.T) {
+	c, err := NewCatalog([]Product{{SKU: "pen", PriceCents: 1500, Active: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Lookup("pen")
+	if err != nil || got.PriceCents != 1500 {
+		t.Fatalf("Lookup(pen) = %+v, %v", got, err)
+	}
+	if _, err := c.Lookup("missing"); !errors.Is(err, ErrUnknownSKU) {
+		t.Fatalf("unknown SKU error = %v", err)
+	}
+}
+
+func TestDuplicateSKU(t *testing.T) {
+	_, err := NewCatalog([]Product{
+		{SKU: "pen", PriceCents: 1500, Active: true},
+		{SKU: "pen", PriceCents: 1500, Active: true},
+	})
+	if !errors.Is(err, ErrDuplicateSKU) {
+		t.Fatalf("duplicate SKU error = %v", err)
+	}
+}
+}
+[step 15]toolCall: read_file
+[step 15]result: {Success:true Output:package pricing
+
+import (
+	"testing"
+
+	"example.com/codeverify-callgraph-fixture/catalog"
+	"example.com/codeverify-callgraph-fixture/promo"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+// 契约：免运费资格必须基于折扣后的 payable 金额。
+// 场景：subtotal=12000 >= 门槛 10000，但 25% 折扣后 payable=9000 < 门槛，
+// 因此必须收取国内运费 1200。
+func TestVerifyFreeShippingUsesPayable(t *testing.T) {
+	c, err := catalog.NewCatalog([]catalog.Product{
+		{SKU: "keyboard", PriceCents: 12000, Active: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := promo.NewEngine([]promo.Rule{{Code: "SAVE25", Percent: 25}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := shipping.NewCalculator(1200, 2500, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := NewEngine(c, p, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	q, err := e.Quote([]Line{{SKU: "keyboard", Quantity: 1}}, "SAVE25", shipping.Domestic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if q.SubtotalCents != 12000 || q.DiscountCents != 3000 {
+		t.Fatalf("unexpected subtotal/discount: %+v", q)
+	}
+	if q.PayableMerchandiseCents() != 9000 {
+		t.Fatalf("payable = %d, want 9000", q.PayableMerchandiseCents())
+	}
+	if q.ShippingCents != 1200 {
+		t.Fatalf("ShippingCents = %d, want 1200 (payable 9000 < threshold 10000)", q.ShippingCents)
+	}
+	if q.TotalCents != 10200 {
+		t.Fatalf("TotalCents = %d, want 10200", q.TotalCents)
+	}
+	if !q.ValidateTotals() {
+		t.Fatalf("inconsistent quote: %+v", q)
+	}
+}
+}
+[step 16]toolCall: get_call
+[step 16]result: {Success:true Output:Target:
+	func (*Engine) completeQuote(subtotal, discount int64, zone shipping.Zone) (Quote, error)
+
+Related Functions:
+	func (*Calculator) Fee(payableMerchandiseCents int64, zone Zone) (int64, error)
+	File: shipping/shipping.go:39
+
+	func (*Calculator) domesticFee(payableMerchandiseCents int64) int64
+	File: shipping/shipping.go:53
+
+	func (*Calculator) internationalFee() int64
+	File: shipping/shipping.go:60
+
+	func (*Calculator) EligibleForFreeDomestic(payableMerchandiseCents int64) bool
+	File: shipping/shipping.go:64
+
+Call Relations:
+	(*Engine).completeQuote -> (*Calculator).Fee
+	(*Calculator).Fee -> (*Calculator).domesticFee
+	(*Calculator).Fee -> (*Calculator).internationalFee
+	(*Calculator).domesticFee -> (*Calculator).EligibleForFreeDomestic
+}
+[step 16]toolCall: get_call
+[step 16]result: {Success:true Output:Target:
+	func (*Service) Quote(req Request) (pricing.Quote, error)
+
+Related Functions:
+	func validateRequest(req Request) error
+	File: checkout/checkout.go:44
+
+	func (*Engine) Quote(lines []Line, promotionCode string, zone shipping.Zone) (Quote, error)
+	File: pricing/pricing.go:54
+
+	func (*Engine) sumLines(lines []Line) (int64, error)
+	File: pricing/pricing.go:66
+
+	func (*Engine) calculateDiscount(code string, subtotal int64) (int64, error)
+	File: pricing/pricing.go:84
+
+	func (*Engine) completeQuote(subtotal, discount int64, zone shipping.Zone) (Quote, error)
+	File: pricing/pricing.go:88
+
+	func (*Catalog) Lookup(sku string) (Product, error)
+	File: catalog/catalog.go:59
+
+	func (*Engine) Discount(code string, subtotalCents int64) (int64, error)
+	File: promo/promo.go:62
+
+	func (*Calculator) Fee(payableMerchandiseCents int64, zone Zone) (int64, error)
+	File: shipping/shipping.go:39
+
+	func (*Engine) Lookup(code string) (Rule, error)
+	File: promo/promo.go:52
+
+	func (Rule) Eligible(subtotalCents int64) bool
+	File: promo/promo.go:30
+
+	func limitDiscount(discount, cap int64) int64
+	File: promo/promo.go:83
+
+	func percentOff(amount int64, percent int) int64
+	File: promo/promo.go:79
+
+	func (*Calculator) domesticFee(payableMerchandiseCents int64) int64
+	File: shipping/shipping.go:53
+
+	func (*Calculator) internationalFee() int64
+	File: shipping/shipping.go:60
+
+	func (*Calculator) EligibleForFreeDomestic(payableMerchandiseCents int64) bool
+	File: shipping/shipping.go:64
+
+Call Relations:
+	(*Service).Quote -> validateRequest
+	(*Service).Quote -> (*Engine).Quote
+	(*Engine).Quote -> (*Engine).sumLines
+	(*Engine).Quote -> (*Engine).calculateDiscount
+	(*Engine).Quote -> (*Engine).completeQuote
+	(*Engine).sumLines -> (*Catalog).Lookup
+	(*Engine).calculateDiscount -> (*Engine).Discount
+	(*Engine).completeQuote -> (*Calculator).Fee
+	(*Engine).Discount -> (*Engine).Lookup
+	(*Engine).Discount -> (Rule).Eligible
+	(*Engine).Discount -> limitDiscount
+	(*Engine).Discount -> percentOff
+	(*Calculator).Fee -> (*Calculator).domesticFee
+	(*Calculator).Fee -> (*Calculator).internationalFee
+	(*Calculator).domesticFee -> (*Calculator).EligibleForFreeDomestic
+}
+[step 16]toolCall: run_test
+[step 16]result: {Success:false Output:evidence_id: call_02_3HnxcsDalxcy2gWZzQWY4191,
+ ok  	example.com/codeverify-callgraph-fixture/catalog	(cached)
+ok  	example.com/codeverify-callgraph-fixture/checkout	(cached)
+--- FAIL: TestVerifyFreeShippingUsesPayable (0.00s)
+    pricing_verify_test.go:46: ShippingCents = 0, want 1200 (payable 9000 < threshold 10000)
+FAIL
+FAIL	example.com/codeverify-callgraph-fixture/pricing	0.252s
+ok  	example.com/codeverify-callgraph-fixture/promo	(cached)
+ok  	example.com/codeverify-callgraph-fixture/shipping	(cached)
+FAIL
+}
+[step 17]toolCall: record_risk
+[step 17]result: {Success:true Output:riskID:R2 ,riskStatus:suspected}
+[step 17]toolCall: write_file
+[step 17]result: {Success:true Output:write ./checkout/boundary_verify_test.go success}
+[step 18]toolCall: run_test
+[step 18]result: {Success:false Output:evidence_id: call_00_hvB84S0t23zPZhD6dXEI9927,
+ ok  	example.com/codeverify-callgraph-fixture/catalog	(cached)
+ok  	example.com/codeverify-callgraph-fixture/checkout	0.456s
+--- FAIL: TestVerifyFreeShippingUsesPayable (0.00s)
+    pricing_verify_test.go:46: ShippingCents = 0, want 1200 (payable 9000 < threshold 10000)
+FAIL
+FAIL	example.com/codeverify-callgraph-fixture/pricing	0.109s
+ok  	example.com/codeverify-callgraph-fixture/promo	(cached)
+ok  	example.com/codeverify-callgraph-fixture/shipping	(cached)
+FAIL
+}
+[step 19]toolCall: submit_verdict
+[step 19]result: {Success:true Output:update risk R2 status to rejected}
+[step 20]toolCall: read_file
+[step 20]result: {Success:true Output:// Package pricing combines merchandise, promotion and shipping calculations.
+package pricing
+
+import (
+	"errors"
+
+	"example.com/codeverify-callgraph-fixture/catalog"
+	"example.com/codeverify-callgraph-fixture/promo"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+var (
+	ErrInvalidLines  = errors.New("invalid cart lines")
+	ErrNilDependency = errors.New("missing pricing dependency")
+)
+
+type Line struct {
+	SKU      string
+	Quantity int
+}
+
+type Quote struct {
+	SubtotalCents int64
+	DiscountCents int64
+	ShippingCents int64
+	TotalCents    int64
+}
+
+func (q Quote) PayableMerchandiseCents() int64 {
+	return q.SubtotalCents - q.DiscountCents
+}
+
+func (q Quote) SavedCents() int64 { return q.DiscountCents }
+
+func (q Quote) ValidateTotals() bool {
+	return q.TotalCents == q.PayableMerchandiseCents()+q.ShippingCents
+}
+
+type Engine struct {
+	catalog  *catalog.Catalog
+	promos   *promo.Engine
+	shipping *shipping.Calculator
+}
+
+func NewEngine(c *catalog.Catalog, p *promo.Engine, s *shipping.Calculator) (*Engine, error) {
+	if c == nil || p == nil || s == nil {
+		return nil, ErrNilDependency
+	}
+	return &Engine{catalog: c, promos: p, shipping: s}, nil
+}
+
+// Quote computes merchandise subtotal, promotion discount and delivery fee.
+// Shipping eligibility must use the discounted, payable merchandise amount.
+func (e *Engine) Quote(lines []Line, promotionCode string, zone shipping.Zone) (Quote, error) {
+	subtotal, err := e.sumLines(lines)
+	if err != nil {
+		return Quote{}, err
+	}
+	discount, err := e.calculateDiscount(promotionCode, subtotal)
+	if err != nil {
+		return Quote{}, err
+	}
+	return e.completeQuote(subtotal, discount, zone)
+}
+
+func (e *Engine) sumLines(lines []Line) (int64, error) {
+	if len(lines) == 0 || len(lines) > 20 {
+		return 0, ErrInvalidLines
+	}
+	var subtotal int64
+	for _, line := range lines {
+		if line.Quantity <= 0 || line.Quantity > 100 {
+			return 0, ErrInvalidLines
+		}
+		item, err := e.catalog.Lookup(line.SKU)
+		if err != nil {
+			return 0, err
+		}
+		subtotal += item.PriceCents * int64(line.Quantity)
+	}
+	return subtotal, nil
+}
+
+func (e *Engine) calculateDiscount(code string, subtotal int64) (int64, error) {
+	return e.promos.Discount(code, subtotal)
+}
+
+func (e *Engine) completeQuote(subtotal, discount int64, zone shipping.Zone) (Quote, error) {
+	payable := subtotal - discount
+	if payable < 0 {
+		return Quote{}, ErrInvalidLines
+	}
+
+	// Delivery is calculated separately from promotion eligibility.
+	fee, err := e.shipping.Fee(subtotal, zone)
+	if err != nil {
+		return Quote{}, err
+	}
+	return Quote{
+		SubtotalCents: subtotal,
+		DiscountCents: discount,
+		ShippingCents: fee,
+		TotalCents:    payable + fee,
+	}, nil
+}
+}
+[step 20]toolCall: read_file
+[step 20]result: {Success:true Output:// Package checkout exposes customer-facing quote operations.
+package checkout
+
+import (
+	"errors"
+	"fmt"
+
+	"example.com/codeverify-callgraph-fixture/pricing"
+	"example.com/codeverify-callgraph-fixture/shipping"
+)
+
+var (
+	ErrNoPricingEngine = errors.New("checkout pricing engine is required")
+	ErrEmptyCart       = errors.New("cart must contain at least one item")
+)
+
+type Request struct {
+	Lines     []pricing.Line
+	PromoCode string
+	Zone      shipping.Zone
+}
+
+type Service struct {
+	pricing *pricing.Engine
+}
+
+func NewService(engine *pricing.Engine) (*Service, error) {
+	if engine == nil {
+		return nil, ErrNoPricingEngine
+	}
+	return &Service{pricing: engine}, nil
+}
+
+// Quote returns the amount a customer should pay for an order.
+// Domestic free-shipping eligibility is based on merchandise AFTER discounts,
+// not the original price. Quote must satisfy this rule for all valid requests.
+func (s *Service) Quote(req Request) (pricing.Quote, error) {
+	if err := validateRequest(req); err != nil {
+		return pricing.Quote{}, err
+	}
+	return s.pricing.Quote(req.Lines, req.PromoCode, req.Zone)
+}
+
+func validateRequest(req Request) error {
+	if len(req.Lines) == 0 {
+		return ErrEmptyCart
+	}
+	return nil
+}
+
+// Preview is a presentation helper, not a payment operation.
+func (s *Service) Preview(req Request) (string, error) {
+	q, err := s.Quote(req)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("total=%d discount=%d shipping=%d", q.TotalCents, q.DiscountCents, q.ShippingCents), nil
+}
+
+func (s *Service) IsFreeDelivery(req Request) (bool, error) {
+	q, err := s.Quote(req)
+	if err != nil {
+		return false, err
+	}
+	return q.ShippingCents == 0, nil
+}
+
+func LineCount(req Request) int { return len(req.Lines) }
+}
+[step 20]toolCall: read_file
+[step 20]result: {Success:true Output:// Package promo applies percentage-based promotional rules.
+package promo
+
+import (
+	"errors"
+	"sort"
+	"strings"
+)
+
+var (
+	ErrInvalidRule = errors.New("invalid promotion rule")
+	ErrUnknownCode = errors.New("unknown promotion code")
+	ErrBadSubtotal = errors.New("subtotal must be non-negative")
+)
+
+type Rule struct {
+	Code             string
+	Percent          int
+	MinSubtotalCents int64
+	MaxDiscountCents int64 // Zero means no cap.
+}
+
+func (r Rule) Validate() error {
+	if strings.TrimSpace(r.Code) == "" || r.Percent <= 0 || r.Percent > 80 || r.MinSubtotalCents < 0 || r.MaxDiscountCents < 0 {
+		return ErrInvalidRule
+	}
+	return nil
+}
+
+func (r Rule) Eligible(subtotalCents int64) bool {
+	return subtotalCents >= r.MinSubtotalCents
+}
+
+type Engine struct {
+	rules map[string]Rule
+}
+
+func NewEngine(rules []Rule) (*Engine, error) {
+	e := &Engine{rules: make(map[string]Rule, len(rules))}
+	for _, r := range rules {
+		if err := r.Validate(); err != nil {
+			return nil, err
+		}
+		if _, duplicate := e.rules[r.Code]; duplicate {
+			return nil, ErrInvalidRule
+		}
+		e.rules[r.Code] = r
+	}
+	return e, nil
+}
+
+func (e *Engine) Lookup(code string) (Rule, error) {
+	r, ok := e.rules[code]
+	if !ok {
+		return Rule{}, ErrUnknownCode
+	}
+	return r, nil
+}
+
+// Discount returns the discount on the merchandise subtotal, in cents.
+// An empty code means no promotion.
+func (e *Engine) Discount(code string, subtotalCents int64) (int64, error) {
+	if subtotalCents < 0 {
+		return 0, ErrBadSubtotal
+	}
+	if code == "" {
+		return 0, nil
+	}
+	r, err := e.Lookup(code)
+	if err != nil {
+		return 0, err
+	}
+	if !r.Eligible(subtotalCents) {
+		return 0, nil
+	}
+	return limitDiscount(percentOff(subtotalCents, r.Percent), r.MaxDiscountCents), nil
+}
+
+func percentOff(amount int64, percent int) int64 {
+	return amount * int64(percent) / 100
+}
+
+func limitDiscount(discount, cap int64) int64 {
+	if cap > 0 && discount > cap {
+		return cap
+	}
+	return discount
+}
+
+// Codes is a utility for displaying configured promotional codes.
+func (e *Engine) Codes() []string {
+	codes := make([]string, 0, len(e.rules))
+	for code := range e.rules {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	return codes
+}
+}
+[step 20]toolCall: read_file
+[step 20]result: {Success:true Output:// Package shipping calculates shipping fees for different regions.
+package shipping
+
+import "errors"
+
+var (
+	ErrInvalidRates  = errors.New("invalid shipping rates")
+	ErrUnknownZone   = errors.New("unknown shipping zone")
+	ErrInvalidAmount = errors.New("negative merchandise amount")
+)
+
+type Zone string
+
+const (
+	Domestic      Zone = "domestic"
+	International Zone = "international"
+)
+
+type Calculator struct {
+	domesticFlatCents      int64
+	internationalFlatCents int64
+	freeThresholdCents     int64
+}
+
+func NewCalculator(domesticFlat, internationalFlat, freeThreshold int64) (*Calculator, error) {
+	if domesticFlat < 0 || internationalFlat < 0 || freeThreshold <= 0 {
+		return nil, ErrInvalidRates
+	}
+	return &Calculator{
+		domesticFlatCents:      domesticFlat,
+		internationalFlatCents: internationalFlat,
+		freeThresholdCents:     freeThreshold,
+	}, nil
+}
+
+// Fee computes delivery cost from the PAYABLE merchandise amount,
+// AFTER applying all discounts. Domestic shipping is free when that amount
+// reaches the configured threshold; international delivery has a flat fee.
+func (c *Calculator) Fee(payableMerchandiseCents int64, zone Zone) (int64, error) {
+	if payableMerchandiseCents < 0 {
+		return 0, ErrInvalidAmount
+	}
+	switch zone {
+	case Domestic:
+		return c.domesticFee(payableMerchandiseCents), nil
+	case International:
+		return c.internationalFee(), nil
+	default:
+		return 0, ErrUnknownZone
+	}
+}
+
+func (c *Calculator) domesticFee(payableMerchandiseCents int64) int64 {
+	if c.EligibleForFreeDomestic(payableMerchandiseCents) {
+		return 0
+	}
+	return c.domesticFlatCents
+}
+
+func (c *Calculator) internationalFee() int64 {
+	return c.internationalFlatCents
+}
+
+func (c *Calculator) EligibleForFreeDomestic(payableMerchandiseCents int64) bool {
+	return payableMerchandiseCents >= c.freeThresholdCents
+}
+
+func (c *Calculator) Threshold() int64 { return c.freeThresholdCents }
+
+func SupportedZones() []Zone { return []Zone{Domestic, International} }
+}
+[step 20]toolCall: read_file
+[step 20]result: {Success:true Output:// Package catalog stores items available for purchase.
+package catalog
+
+import (
+	"errors"
+	"sort"
+	"strings"
+)
+
+var (
+	ErrInvalidProduct = errors.New("invalid catalog product")
+	ErrDuplicateSKU   = errors.New("duplicate SKU")
+	ErrUnknownSKU     = errors.New("unknown SKU")
+	ErrUnavailable    = errors.New("product unavailable")
+)
+
+// Product uses integer cents to avoid floating-point pricing errors.
+type Product struct {
+	SKU        string
+	Title      string
+	PriceCents int64
+	Active     bool
+}
+
+// Validate checks the basic product definition.
+func (p Product) Validate() error {
+	if strings.TrimSpace(p.SKU) == "" || p.PriceCents <= 0 || p.PriceCents > 1_000_000 {
+		return ErrInvalidProduct
+	}
+	return nil
+}
+
+func (p Product) Label() string {
+	if p.Title != "" {
+		return p.Title
+	}
+	return p.SKU
+}
+
+type Catalog struct {
+	products map[string]Product
+}
+
+func NewCatalog(products []Product) (*Catalog, error) {
+	c := &Catalog{products: make(map[string]Product, len(products))}
+	for _, p := range products {
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+		if _, exists := c.products[p.SKU]; exists {
+			return nil, ErrDuplicateSKU
+		}
+		c.products[p.SKU] = p
+	}
+	return c, nil
+}
+
+// Lookup returns only active products.
+func (c *Catalog) Lookup(sku string) (Product, error) {
+	p, ok := c.products[sku]
+	if !ok {
+		return Product{}, ErrUnknownSKU
+	}
+	if !p.Active {
+		return Product{}, ErrUnavailable
+	}
+	return p, nil
+}
+
+func (c *Catalog) Count() int { return len(c.products) }
+
+func (c *Catalog) Has(sku string) bool {
+	_, ok := c.products[sku]
+	return ok
+}
+
+// SKUs returns catalog keys in stable order; this is an administrative helper.
+func (c *Catalog) SKUs() []string {
+	ids := make([]string, 0, len(c.products))
+	for id := range c.products {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+}
+我已通读全部生产源码（catalog/promo/shipping/pricing/checkout），并结合调用链与运行证据完成审计。未发现 R1 之外的其他契约违背，下面给出最终验证报告。
+
+---
+
+# 代码验证最终报告
+
+## 一、验证范围与方法
+
+- **仓库**：`example.com/codeverify-callgraph-fixture`，包含 5 个包：`catalog`、`promo`、`shipping`、`pricing`、`checkout`。
+- **方法**：
+  1. 通读全部生产源码与既有测试，提取文档化契约（注释中明确承诺的行为）。
+  2. 借助调用链分析确认关键数据流（`checkout.Service.Quote → pricing.Engine.Quote → completeQuote → shipping.Fee`）。
+  3. 针对现有测试未覆盖的边界编写验证测试，通过 `go test ./...` 获取可执行证据。
+- **约束遵守**：未修改任何生产代码，仅新增 `_test.go` 文件。
+
+## 二、确认的缺陷
+
+### R1 — `pricing.completeQuote` 使用折扣前 subtotal 计算运费（已确认）
+
+- **位置**：`pricing/pricing.go:88` `completeQuote`
+- **根因**：调用 `e.shipping.Fee(subtotal, zone)` 传入了折扣前的 `subtotal`，而正确应为折扣后的 `payable = subtotal - discount`。
+- **契约依据**：
+  - `shipping/shipping.go` `Fee` 文档：*"Fee computes delivery cost from the PAYABLE merchandise amount, AFTER applying all discounts. Domestic shipping is free when that amount reaches the configured threshold."*
+  - `pricing/pricing.go` `Quote` 注释：*"Shipping eligibility must use the discounted, payable merchandise amount."*
+  - `checkout/checkout.go` `Quote` 注释：*"Domestic free-shipping eligibility is based on merchandise AFTER discounts, not the original price."*
+- **验证场景**：`subtotal=12000`（≥ 免运费门槛 10000），25% 折扣后 `payable=9000`（< 门槛），国内配送。
+- **期望 vs 实际**：期望 `ShippingCents=1200`、`TotalCents=10200`；实际 `ShippingCents = 0`，错误地免运费，`TotalCents` 仅为 9000。
+- **证据**：测试 `pricing/pricing_verify_test.go::TestVerifyFreeShippingUsesPayable`，运行 `go test ./...` 输出：
+  ```
+  --- FAIL: TestVerifyFreeShippingUsesPayable (0.00s)
+      pricing_verify_test.go:46: ShippingCents = 0, want 1200 (payable 9000 < threshold 10000)
+  ```
+- **为何既有测试未发现**：`pricing_test.go::TestQuoteDiscountStillAboveThreshold` 用 `24000−6000=18000`，折扣前后均高于门槛，折扣前后运费结果相同，掩盖了该缺陷。
+- **影响**：当折扣使应付商品金额跌破免运费门槛时，系统会错误免运费，导致费用低收；且该错误会通过 `checkout.Quote`、`checkout.IsFreeDelivery`、`checkout.Preview` 向上传播。`Quote.ValidateTotals()` 无法捕获，因为它与错误的运费计算保持一致。
+- **证据 ID**：`call_00_4LBld5s7hJagwRezBpQH9272`
+
+## 三、已排查并否定的风险
+
+### R2 — 其他包错误分支/边界（已否定）
+
+- **假设**：`catalog`/`promo`/`shipping` 的未激活商品查找、未知促销码、负 subtotal、未知配送区域、非法运费配置等分支可能返回错误值。
+- **证据**：新增 `checkout/boundary_verify_test.go::TestVerifyOtherPackageBoundaries`，覆盖：
+  - `catalog.Lookup` 未激活商品 → `ErrUnavailable` ✅
+  - `promo` 折扣上限 cap（300×50%→150 被截为 100）、未知码 `ErrUnknownCode`、负 subtotal `ErrBadSubtotal` ✅
+  - `shipping` 负金额 `ErrInvalidAmount`、未知区域 `ErrUnknownZone`、非法配置 `ErrInvalidRates` ✅
+- **结果**：运行 `go test ./...` 中该测试所在包 `ok example.com/codeverify-callgraph-fixture/checkout 0.456s`，全部断言通过。除 R1 外无其他缺陷，假设不成立。
+- **证据 ID**：`call_00_hvB84S0t23zPZhD6dXEI9927`
+
+## 四、整体测试执行结果
+
+```
+ok   .../catalog   (cached)
+ok   .../checkout  0.456s
+--- FAIL: TestVerifyFreeShippingUsesPayable
+    pricing_verify_test.go:46: ShippingCents = 0, want 1200 (payable 9000 < threshold 10000)
+FAIL .../pricing   0.109s
+ok   .../promo     (cached)
+ok   .../shipping  (cached)
+```
+
+## 五、结论
+
+- **确认缺陷：1 个（R1）** —— `pricing.completeQuote` 未使用折扣后金额计算运费，导致免运费门槛判断错误。
+- **否定风险：1 个（R2）** —— `catalog`/`promo`/`shipping` 的错误分支与边界行为符合契约。
+- **建议修复方向**（仅提示，未改动代码）：`completeQuote` 中应将 `e.shipping.Fee(subtotal, zone)` 改为 `e.shipping.Fee(payable, zone)`，并补充“折扣后金额跨过门槛”的回归测试。
